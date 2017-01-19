@@ -44,6 +44,10 @@ namespace NMemory.Exceptions
         /// <summary>
         /// Relation error
         /// </summary>
-        RelationError
+        RelationError,
+        /// <summary>
+        /// Register Table Timeout error
+        /// </summary>
+        RegisteTableTimeoutError
     }
 }

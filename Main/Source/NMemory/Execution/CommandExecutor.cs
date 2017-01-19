@@ -36,10 +36,13 @@ namespace NMemory.Execution
     using NMemory.Tables;
     using NMemory.Transactions.Logs;
     using NMemory.Utilities;
+    using System.Diagnostics;
+    using System.Text;
 
     public class CommandExecutor : ICommandExecutor
     {
         private IDatabase database;
+        private object commandSafeLocker = new object();
 
         public void Initialize(IDatabase database)
         {
@@ -49,101 +52,111 @@ namespace NMemory.Execution
         #region Query
 
         public IEnumerator<T> ExecuteQuery<T>(
-            IExecutionPlan<IEnumerable<T>> plan, 
+            IExecutionPlan<IEnumerable<T>> plan,
             IExecutionContext context)
         {
-            ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
+            lock (commandSafeLocker)
+            {
 
-            return ExecuteQuery(plan, context, tables, cloneEntities: true);
+                ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
+
+                return ExecuteQuery(plan, context, tables, cloneEntities: true);
+            }
         }
 
-         private IEnumerator<T> ExecuteQuery<T>(
-            IExecutionPlan<IEnumerable<T>> plan, 
-            IExecutionContext context,
-            ITable[] tablesToLock,
-            bool cloneEntities)
+        private IEnumerator<T> ExecuteQuery<T>(
+           IExecutionPlan<IEnumerable<T>> plan,
+           IExecutionContext context,
+           ITable[] tablesToLock,
+           bool cloneEntities)
         {
-            ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
-
-            Action<T, T> cloner = null;
-            if (cloneEntities && this.database.Tables.IsEntityType<T>())
+            lock (commandSafeLocker)
             {
-                cloner = context
-                    .GetService<IEntityService>()
-                    .CloneProperties<T>;
-            }
+                ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
 
-            LinkedList<T> result = new LinkedList<T>();
-
-            for (int i = 0; i < tablesToLock.Length; i++)
-            {
-                this.AcquireReadLock(tablesToLock[i], context);
-            }
-
-            IEnumerable<T> query = plan.Execute(context);
-
-            try
-            {
-                foreach (T item in query)
+                Action<T, T> cloner = null;
+                if (cloneEntities && this.database.Tables.IsEntityType<T>())
                 {
-                    if (cloner != null && item != null)
-                    {
-                        T resultEntity = Activator.CreateInstance<T>();
-                        cloner(item, resultEntity);
-
-                        result.AddLast(resultEntity);
-                    }
-                    else
-                    {
-                        result.AddLast(item);
-                    }
+                    cloner = context
+                        .GetService<IEntityService>()
+                        .CloneProperties<T>;
                 }
-            }
-            finally
-            {
+
+                LinkedList<T> result = new LinkedList<T>();
+
                 for (int i = 0; i < tablesToLock.Length; i++)
                 {
-                    this.ReleaseReadLock(tablesToLock[i], context);
+                    this.AcquireReadLock(tablesToLock[i], context);
                 }
-            }
 
-            return result.GetEnumerator();
+                IEnumerable<T> query = plan.Execute(context);
+
+                try
+                {
+                    foreach (T item in query)
+                    {
+                        if (cloner != null && item != null)
+                        {
+                            T resultEntity = Activator.CreateInstance<T>();
+                            cloner(item, resultEntity);
+
+                            result.AddLast(resultEntity);
+                        }
+                        else
+                        {
+                            result.AddLast(item);
+                        }
+                    }
+                }
+                finally
+                {
+                    for (int i = 0; i < tablesToLock.Length; i++)
+                    {
+                        this.ReleaseReadLock(tablesToLock[i], context);
+                    }
+                }
+
+                return result.GetEnumerator();
+            }
         }
 
         public T ExecuteQuery<T>(
-            IExecutionPlan<T> plan, 
+            IExecutionPlan<T> plan,
             IExecutionContext context)
         {
-            ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
-
-            for (int i = 0; i < tables.Length; i++)
+            lock (commandSafeLocker)
             {
-                this.AcquireReadLock(tables[i], context);
-            }
+                ITable[] tables = TableLocator.FindAffectedTables(context.Database, plan);
 
-            Action<T, T> cloner = context
-                .GetService<IEntityService>()
-                .CloneProperties<T>;
-
-            try
-            {
-                var result = plan.Execute(context);
-
-                if (this.database.Tables.IsEntityType<T>() && result != null)
-                {
-                    T resultEntity = Activator.CreateInstance<T>();
-                    cloner(result, resultEntity);
-
-                    result = resultEntity;
-                }
-
-                return result;
-            }
-            finally
-            {
                 for (int i = 0; i < tables.Length; i++)
                 {
-                    this.ReleaseReadLock(tables[i], context);
+                    this.AcquireReadLock(tables[i], context);
+                }
+
+                Action<T, T> cloner = context
+                    .GetService<IEntityService>()
+                    .CloneProperties<T>;
+
+                try
+                {
+                    var result = plan.Execute(context);
+
+                    if (this.database.Tables.IsEntityType<T>() && result != null)
+                    {
+                        T resultEntity = Activator.CreateInstance<T>();
+                        cloner(result, resultEntity);
+
+                        result = resultEntity;
+                    }
+
+                    return result;
+                }
+                finally
+                {
+                    for (int i = 0; i < tables.Length; i++)
+                    {
+                        this.ReleaseReadLock(tables[i], context);
+                    }
                 }
             }
         }
@@ -151,81 +164,86 @@ namespace NMemory.Execution
         #endregion
 
         #region Insert
-        
-        public void ExecuteInsert<T>(T entity, IExecutionContext context) 
+
+        public void ExecuteInsert<T>(T entity, IExecutionContext context)
             where T : class
         {
-            var helper = new ExecutionHelper(this.Database);
-            var table = this.Database.Tables.FindTable<T>();
-
-            table.Contraints.Apply(entity, context);
-
-            // Find referred relations
-            // Do not add referring relations!
-            RelationGroup relations = helper.FindRelations(table.Indexes, referring: false);
-
-            // Acquire locks
-            this.AcquireWriteLock(table, context);
-            this.LockRelatedTables(relations, context, table);
-
-            try
+            lock (commandSafeLocker)
             {
-                // Validate the inserted record
-                helper.ValidateForeignKeys(relations.Referred, new[] { entity });
+                var helper = new ExecutionHelper(this.Database);
+                var table = this.Database.Tables.FindTable<T>();
 
-                using (AtomicLogScope logScope = this.StartAtomicLogOperation(context))
+                table.Contraints.Apply(entity, context);
+
+                // Find referred relations
+                // Do not add referring relations!
+                RelationGroup relations = helper.FindRelations(table.Indexes, referring: false);
+
+                // Acquire locks
+                this.AcquireWriteLock(table, context);
+                this.LockRelatedTables(relations, context, table);
+
+                try
                 {
-                    foreach (IIndex<T> index in table.Indexes)
-                    {
-                        index.Insert(entity);
-                        logScope.Log.WriteIndexInsert(index, entity);
-                    }
+                    // Validate the inserted record
+                    helper.ValidateForeignKeys(relations.Referred, new[] { entity });
 
-                    logScope.Complete();
+                    using (AtomicLogScope logScope = this.StartAtomicLogOperation(context))
+                    {
+                        foreach (IIndex<T> index in table.Indexes)
+                        {
+                            index.Insert(entity);
+                            logScope.Log.WriteIndexInsert(index, entity);
+                        }
+
+                        logScope.Complete();
+                    }
                 }
-            }
-            finally
-            {
-                this.ReleaseWriteLock(table, context);
+                finally
+                {
+                    this.ReleaseWriteLock(table, context);
+                }
             }
         }
 
         #endregion
 
         #region Delete
-       
+
         public IEnumerable<T> ExecuteDelete<T>(
-            IExecutionPlan<IEnumerable<T>> plan, 
-            IExecutionContext context) 
+            IExecutionPlan<IEnumerable<T>> plan,
+            IExecutionContext context)
             where T : class
         {
-            var helper = new ExecutionHelper(this.Database);
-            var table = this.Database.Tables.FindTable<T>();
-            var cascadedTables = helper.GetCascadedTables(table);
-            var allTables = cascadedTables.Concat(new[] { table }).ToArray();
-
-            // Find relations
-            // Do not add referred relations!
-            RelationGroup allRelations =
-                helper.FindRelations(allTables.SelectMany(x => x.Indexes), referred: false);
-
-            this.AcquireWriteLock(table, context);
-
-            var storedEntities = this.Query(plan, table, context);
-
-            this.AcquireWriteLock(cascadedTables, context);
-            this.LockRelatedTables(allRelations, context, except: allTables);
-
-            using (AtomicLogScope log = this.StartAtomicLogOperation(context))
+            lock (commandSafeLocker)
             {
-                IDeletePrimitive primitive = new DeletePrimitive(this.Database, log);
+                var helper = new ExecutionHelper(this.Database);
+                var table = this.Database.Tables.FindTable<T>();
+                var cascadedTables = helper.GetCascadedTables(table);
+                var allTables = cascadedTables.Concat(new[] { table }).ToArray();
 
-                primitive.Delete(storedEntities);
+                // Find relations
+                // Do not add referred relations!
+                RelationGroup allRelations =
+                    helper.FindRelations(allTables.SelectMany(x => x.Indexes), referred: false);
 
-                log.Complete();
+                this.AcquireWriteLock(table, context);
+
+                var storedEntities = this.Query(plan, table, context);
+
+                this.AcquireWriteLock(cascadedTables, context);
+                this.LockRelatedTables(allRelations, context, except: allTables);
+
+                using (AtomicLogScope log = this.StartAtomicLogOperation(context))
+                {
+                    IDeletePrimitive primitive = new DeletePrimitive(this.Database, log);
+
+                    primitive.Delete(storedEntities);
+
+                    log.Complete();
+                }
+                return storedEntities.ToArray();
             }
-
-            return storedEntities.ToArray();
         }
 
         #endregion
@@ -238,87 +256,97 @@ namespace NMemory.Execution
             IExecutionContext context)
             where T : class
         {
-            var helper = new ExecutionHelper(this.Database);
-            var table = this.Database.Tables.FindTable<T>();
-
-            Action<T, T> cloner = context.GetService<IEntityService>().CloneProperties<T>;
-
-            // Determine which indexes are affected by the change
-            // If the key of an index containes a changed property, it is affected
-            IList<IIndex<T>> affectedIndexes = 
-                helper.FindAffectedIndexes(table, updater.Changes);
-
-            // Find relations
-            // Add both referring and referred relations!
-            RelationGroup relations = helper.FindRelations(affectedIndexes);
-
-            this.AcquireWriteLock(table, context);
-
-            var storedEntities = Query(plan, table, context);
-
-            // Lock related tables (based on found relations)
-            this.LockRelatedTables(relations, context, table);
-
-            // Find the entities referring the entities that are about to be updated
-            var referringEntities =
-                helper.FindReferringEntities(storedEntities, relations.Referring);
-
-            using (AtomicLogScope logScope = this.StartAtomicLogOperation(context))
+            lock (commandSafeLocker)
             {
-                // Delete invalid index records (keys are invalid)
-                for (int i = 0; i < storedEntities.Count; i++)
-                {
-                    T storedEntity = storedEntities[i];
+                var helper = new ExecutionHelper(this.Database);
+                var table = this.Database.Tables.FindTable<T>();
 
-                    foreach (IIndex<T> index in affectedIndexes)
+                Action<T, T> cloner = context.GetService<IEntityService>().CloneProperties<T>;
+
+                // Determine which indexes are affected by the change
+                // If the key of an index containes a changed property, it is affected
+                IList<IIndex<T>> affectedIndexes =
+                    helper.FindAffectedIndexes(table, updater.Changes);
+
+                // Find relations
+                // Add both referring and referred relations!
+                RelationGroup relations = helper.FindRelations(affectedIndexes);
+
+                this.AcquireWriteLock(table, context);
+
+                var storedEntities = Query(plan, table, context);
+
+                // Lock related tables (based on found relations)
+                this.LockRelatedTables(relations, context, table);
+
+                // Find the entities referring the entities that are about to be updated
+                var referringEntities =
+                    helper.FindReferringEntities(storedEntities, relations.Referring);
+
+                using (AtomicLogScope logScope = this.StartAtomicLogOperation(context))
+                {
+                    // Delete invalid index records (keys are invalid)
+                    for (int i = 0; i < storedEntities.Count; i++)
                     {
-                        index.Delete(storedEntity);
-                        logScope.Log.WriteIndexDelete(index, storedEntity);
+                        T storedEntity = storedEntities[i];
+
+                        foreach (IIndex<T> index in affectedIndexes)
+                        {
+                            index.Delete(storedEntity);
+                            logScope.Log.WriteIndexDelete(index, storedEntity);
+                        }
                     }
-                }
 
-                // Modify entity properties
-                for (int i = 0; i < storedEntities.Count; i++)
-                {
-                    T storedEntity = storedEntities[i];
-
-                    // Create backup
-                    T backup = Activator.CreateInstance<T>();
-                    cloner(storedEntity, backup);
-                    T newEntity = updater.Update(storedEntity);
-
-                    // Apply contraints on the entity
-                    table.Contraints.Apply(newEntity, context);
-
-                    // Update entity
-                    cloner(newEntity, storedEntity);
-                    logScope.Log.WriteEntityUpdate(cloner, storedEntity, backup);
-                }
-
-                // Insert to indexes the entities were removed from
-                for (int i = 0; i < storedEntities.Count; i++)
-                {
-                    T storedEntity = storedEntities[i];
-
-                    foreach (IIndex<T> index in affectedIndexes)
+                    // Modify entity properties
+                    for (int i = 0; i < storedEntities.Count; i++)
                     {
-                        index.Insert(storedEntity);
-                        logScope.Log.WriteIndexInsert(index, storedEntity);
+                        T storedEntity = storedEntities[i];
+
+                        // Create backup
+                        T backup = Activator.CreateInstance<T>();
+                        cloner(storedEntity, backup);
+                        T newEntity = updater.Update(storedEntity);
+
+                        // Apply contraints on the entity
+                        table.Contraints.Apply(newEntity, context);
+
+                        // Update entity
+                        cloner(newEntity, storedEntity);
+                        logScope.Log.WriteEntityUpdate(cloner, storedEntity, backup);
                     }
+
+                    // Insert to indexes the entities were removed from
+                    for (int i = 0; i < storedEntities.Count; i++)
+                    {
+                        T storedEntity = storedEntities[i];
+
+                        foreach (IIndex<T> index in affectedIndexes)
+                        {
+                            index.Insert(storedEntity);
+                            logScope.Log.WriteIndexInsert(index, storedEntity);
+                        }
+                    }
+
+                    // Validate the updated entities
+                    helper.ValidateForeignKeys(relations.Referred, storedEntities);
+
+                    // Validate the entities that were referring to the old version of entities
+                    helper.ValidateForeignKeys(relations.Referring, referringEntities);
+
+                    logScope.Complete();
                 }
-
-                // Validate the updated entities
-                helper.ValidateForeignKeys(relations.Referred, storedEntities);
-
-                // Validate the entities that were referring to the old version of entities
-                helper.ValidateForeignKeys(relations.Referring, referringEntities);
-
-                logScope.Complete();
+                return storedEntities;
             }
 
-            return storedEntities;
         }
-
+        private static string TransInfoToStr(System.Transactions.TransactionInformation transactionInfo)
+        {
+            return string.Format("CreationTime：{0}，LocalIdentifier：{1}，Status：{2}，DisId：{3}",
+                transactionInfo.CreationTime.ToString("yyyy/MM/dd HH:mm:ss:ms"),
+                transactionInfo.LocalIdentifier,
+                transactionInfo.Status,
+                transactionInfo.DistributedIdentifier);
+        }
         #endregion
 
         protected IDatabase Database

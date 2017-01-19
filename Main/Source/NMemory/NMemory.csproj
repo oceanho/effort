@@ -64,6 +64,7 @@
     <Compile Include="Constraints\GeneratedGuidConstraint.cs" />
     <Compile Include="Constraints\IConstraintFactory`1.cs" />
     <Compile Include="Constraints\NotNullableConstraint.cs" />
+    <Compile Include="Diagnostics\Messages\AcquireTableWriteLockMessage.cs" />
     <Compile Include="Diagnostics\Messages\JoinArgumentsOrderSwappedMessage.cs" />
     <Compile Include="Diagnostics\Messages\JoinOperatorsSwappedMessage.cs" />
     <Compile Include="Exceptions\ExceptionMessages.cs" />

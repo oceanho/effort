@@ -113,6 +113,7 @@ namespace NMemory.Tables
             IUpdater<TEntity> updater, 
             Transaction transaction)
         {
+            // hehai 2017-01-16 16:05:22
             IExecutionContext context =
                 new ExecutionContext(this.Database, transaction, OperationType.Update);
 

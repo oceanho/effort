@@ -32,7 +32,7 @@ namespace NMemory.Concurrency
     using NMemory.Modularity;
     using NMemory.Tables;
     using NMemory.Transactions;
-
+    using System.Collections.Concurrent;
     public class TableLockConcurrencyManager : IConcurrencyManager, ITableCatalog
     {
         private IDatabase database;
@@ -40,16 +40,21 @@ namespace NMemory.Concurrency
         // private DeadlockManagementStrategies deadlockManagement;
         private ILockFactory lockFactory;
 
-        private Dictionary<ITable, ILock> tableLocks;
+        private ConcurrentDictionary<ITable, ILock> tableLocks;
         private Graph<object> lockGraph;
         private TransactionLockInventory lockInventory;
 
+        private static readonly int maxRegisterTableRetryCount;
+        static TableLockConcurrencyManager()
+        {
+            maxRegisterTableRetryCount = 10;
+        }
         public TableLockConcurrencyManager()
         {
             // this.deadlockManagement = DeadlockManagementStrategies.DeadlockDetection;
             this.lockFactory = new DefaultLockFactory();
 
-            this.tableLocks = new Dictionary<ITable, ILock>();
+            this.tableLocks = new ConcurrentDictionary<ITable, ILock>();
             this.lockGraph = new Graph<object>();
             this.lockInventory = new TransactionLockInventory();
         }
@@ -66,9 +71,25 @@ namespace NMemory.Concurrency
 
         public void RegisterTable(ITable table)
         {
-            this.tableLocks.Add(table, this.lockFactory.CreateLock());
+            var retried = 0;
+            RegisterTable(table, retried);
         }
 
+        public void RegisterTable(ITable table, int retry)
+        {
+            bool isRegisted = false;
+            while ((!isRegisted) && (retry++ < maxRegisterTableRetryCount))
+            {
+                isRegisted = this.tableLocks.TryAdd(table, this.lockFactory.CreateLock());
+            }
+            if (!isRegisted)
+            {
+                throw new NMemoryException(
+                    ErrorCode.RegisteTableTimeoutError,
+                    string.Format("Register Table Failed, retry={0}", retry)
+                );
+            }
+        }
         public void AcquireTableWriteLock(ITable table, Transaction transaction)
         {
             IList<ITable> tables = this.database.Tables.GetAllTables();
@@ -140,9 +161,9 @@ namespace NMemory.Concurrency
             ////                }
             ////            }
             ////        }
-                    
+
             ////        break;
-                        
+
             ////    #endregion
             ////}
         }

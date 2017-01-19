@@ -274,6 +274,9 @@ namespace NMemory.Tables
         /// </returns>
         IEnumerable<TEntity> IBulkTable<TEntity>.Update(TableQuery<TEntity> query, Expression<Func<TEntity, TEntity>> updater, Transaction transaction)
         {
+            //
+            // ? hehai 2017-01-16 16:04:06
+            // 
             updater = ExpressionHelper.ValidateAndCompleteUpdaterExpression(updater);
             Expression expression = ((IQueryable<TEntity>)query).Expression;
 
@@ -288,6 +291,7 @@ namespace NMemory.Tables
             {
                 using (var tran = Transaction.EnsureTransaction(ref transaction, this.Database))
                 {
+                    // ? hehai 2017-01-16 16:04:57
                     IEnumerable<TEntity> result = this.UpdateCore(query.Expression, updater, transaction);
 
                     tran.Complete();
